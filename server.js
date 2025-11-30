@@ -511,6 +511,7 @@ app.get('/api/trips-detailed', async (req, res) => {
 
 // 健康检查 & 根路径
 app.get('/', (req, res) => {
+  console.log('➡️ GET / hit');
   res.status(200).json({
     status: 'ok',
     message: 'Wilson Telematics Backend is running',
