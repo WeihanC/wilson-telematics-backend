@@ -9,15 +9,15 @@ const dotenv = require('dotenv');
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 4000;
+const PORT = process.env.PORT || 8080;
 
 app.use(cors());
 app.use(express.json());
 
 // Root endpoint
-app.get('/', (req, res) => {
-  res.json({ message: 'Wilson Telematics Backend is running' });
-});
+//app.get('/', (req, res) => {
+//  res.json({ message: 'Wilson Telematics Backend is running' });
+//});
 
 /**
  * GET /api/trips
@@ -507,6 +507,15 @@ app.get('/api/trips-detailed', async (req, res) => {
       detail: err.response?.data || err.message
     });
   }
+});
+
+// 健康检查 & 根路径
+app.get('/', (req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    message: 'Wilson Telematics Backend is running',
+    timestamp: new Date().toISOString()
+  });
 });
 
 
