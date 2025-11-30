@@ -1,6 +1,17 @@
 // server.js
 // Wilson Telematics Backend - proxy for Damoov APIs (Trips + Daily Statistics)
 
+
+process.on('uncaughtException', (err) => {
+  console.error('❌ UNCAUGHT EXCEPTION:', err);
+});
+
+process.on('unhandledRejection', (reason, p) => {
+  console.error('❌ UNHANDLED REJECTION:', reason);
+});
+
+
+
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
