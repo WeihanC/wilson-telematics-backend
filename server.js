@@ -90,7 +90,7 @@ app.get('/api/trips', async (req, res) => {
     const raw = damoovResponse.data;
 
     console.log('=== RAW trips/get/v1 (with statistics) ===');
-    console.dir(raw, { depth: null });
+//    console.dir(raw, { depth: null });
 
     const tripsRaw = raw.Result?.Trips || [];
 
@@ -216,7 +216,7 @@ app.get('/api/trips/:tripId/waypoints', async (req, res) => {
     });
 
     console.log('=== RAW TRIP WAYPOINTS FROM DAMOOV ===');
-    console.dir(damoovResp.data, { depth: 3 });
+//    console.dir(damoovResp.data, { depth: 3 });
 
     const rawTrip = damoovResp.data?.Result?.Trip;
     const waypoints = rawTrip?.Waypoints || [];
@@ -314,7 +314,7 @@ app.get('/api/daily-stats', async (req, res) => {
     const raw = damoovResponse.data;
 
     console.log('=== RAW DAILY STATS FROM DAMOOV ===');
-    console.dir(raw, { depth: null });
+//    console.dir(raw, { depth: null });
 
     const list = raw.Result || [];
 
