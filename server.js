@@ -530,6 +530,19 @@ app.get('/', (req, res) => {
   });
 });
 
+// 接收前端发来的驾驶提醒事件
+app.post('/api/alert-events', (req, res) => {
+  const auth = req.headers.authorization || '';
+  // 这里你可以复用之前验证 JWT 的逻辑，先略过也行
+
+  const { time, level, message } = req.body || {};
+  console.log('📡 [AlertEvent]', { time, level, message });
+
+  // 以后可以存进数据库，现在先只是打印
+  res.json({ ok: true });
+});
+
+
 
 
 app.listen(PORT, () => {
