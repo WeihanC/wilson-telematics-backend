@@ -99,6 +99,10 @@ async function fetchNewTokenFromDamoov() {
       err.response?.status,
       err.response?.data || err.message
     );
+  console.error('  status:', err.response?.status);
+  console.error('  headers:', err.response?.headers);
+  console.error('  data:', JSON.stringify(err.response?.data || {}, null, 2));
+  console.error('  message:', err.message);
     return null;
   }
 }

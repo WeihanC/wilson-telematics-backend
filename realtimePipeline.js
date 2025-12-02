@@ -40,51 +40,51 @@ let currentJwt = null;
 // ========== 4. 登录函数：调用 /v1/Auth/Login 拿新 JWT ==========
 
 async function loginForRealtime() {
-  if (!AUTH_INSTANCE_ID || !AUTH_LOGIN_EMAIL || !AUTH_PASSWORD) {
-    console.warn('⚠️ 缺少 DAMOOV_AUTH_* 环境变量，无法自动登录获取 JWT');
+  if (!AUTH_LOGIN_EMAIL || !AUTH_PASSWORD) {
+    console.warn('⚠️ 缺少 DAMOOV_AUTH_LOGIN_EMAIL 或 DAMOOV_AUTH_PASSWORD，无法自动登录获取 JWT');
     return null;
   }
 
   try {
     console.log('🔐 调用 Auth/Login 获取新的 JWT ...');
 
-    const resp = await axios.post(
-      AUTH_URL,
-      {
-        // 按文档“Authorize as Admin with API Authorization Credentials”
-        // curl 示例里字段是小写 loginFields / password
-        loginFields: { Email: AUTH_LOGIN_EMAIL },
-        password: AUTH_PASSWORD
-      },
-      {
-        headers: {
-          // 这里的 InstanceId / InstanceKey 来自你管理页面的 API Instance
-          InstanceId: AUTH_INSTANCE_ID,
-          InstanceKey: AUTH_INSTANCE_KEY || '',
-          'Content-Type': 'application/json-patch+json',
-          accept: '*/*'
-        }
-      }
-    );
+    // 🔑 完全按照官网 Swift 示例的结构来
+    const body = {
+      // 注意：这里是大写 L 的 LoginFields，而且 value 是一个 JSON 字符串
+      LoginFields: JSON.stringify({ email: AUTH_LOGIN_EMAIL }),
+      Password: AUTH_PASSWORD
+    };
 
-    const result = resp.data.Result || {};
-    const token = result.AccessToken?.Token;
-    const refreshToken = result.RefreshToken;
+    const resp = await axios.post(AUTH_URL, body, {
+      headers: {
+        accept: 'application/json',
+        'Content-Type': 'application/json'
+      },
+      timeout: 10_000
+    });
+
+    // 暂时沿用你原来解析 Result 的逻辑，如果返回结构不同，我们再根据 log 调整
+    const result = resp.data.Result || resp.data.result || resp.data || {};
+    const token =
+      result.AccessToken?.Token ||
+      result.accessToken?.token ||
+      result.AccessToken ||
+      result.token;
 
     if (!token) {
-      console.error('❌ Auth/Login 返回的结果里没有 AccessToken.Token：', resp.data);
+      console.error('❌ Auth/Login 返回里找不到 Token，完整响应：', resp.data);
       return null;
     }
 
     currentJwt = token;
-    console.log('✅ Auth/Login 成功获取 JWT（RefreshToken 是否存在：', !!refreshToken, '）');
-
-    // 👉 现在我们先不单独调 RefreshToken，而是：
-    //    如果 WebSocket 报 401 / 403，就再调一次 Login 拿新的 JWT，
-    //    对你来说已经是“自动更新”了，不用每天自己手动去 portal 换。
+    console.log('✅ Auth/Login 成功获取 JWT，长度 =', String(token).length);
     return token;
   } catch (err) {
-    console.error('❌ Auth/Login 调用失败：', err.response?.data || err.message);
+    console.error('❌ Auth/Login 调用失败：', {
+      status: err.response?.status,
+      data: err.response?.data,
+      message: err.message
+    });
     return null;
   }
 }
