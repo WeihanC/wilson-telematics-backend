@@ -20,7 +20,7 @@ const app = express();
 const PORT = process.env.PORT || 8080;
 
 // 👇 新增：引入实时 WebSocket 管线
-const { setupRealtimePipeline } = require('./realtimePipeline');
+const { startRealtimePipeline } = require('./realtimePipeline');
 
 app.use(cors());
 app.use(express.json());
@@ -533,7 +533,7 @@ app.post('/api/alert-events', (req, res) => {
 });
 
 // 👇 在 listen 之前启动 Realtime WebSocket 管线
-setupRealtimePipeline(app);
+startRealtimePipeline(app);
 
 app.listen(PORT, () => {
   console.log(`🚀 Wilson Telematics Backend is running on port ${PORT}`);
