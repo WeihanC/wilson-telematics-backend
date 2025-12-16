@@ -1,5 +1,5 @@
 // server.js
-// Wilson Telematics Backend - proxy for Damoov APIs + Pricing Summary
+// Wilson Telematics Backend - proxy for Damoov APIs + Pricing Summary + Alert events
 
 const express = require("express");
 const axios = require("axios");
@@ -8,7 +8,7 @@ const dotenv = require("dotenv");
 
 dotenv.config();
 
-const { computeTripPremium, computePricingSummary } = require("./pricingEngine");
+const { calculateTripCost, PRICING_CONFIG } = require("./pricingEngine");
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -16,7 +16,7 @@ const PORT = process.env.PORT || 4000;
 app.use(cors());
 app.use(express.json());
 
-// Root endpoint
+// Root
 app.get("/", (req, res) => {
   res.json({ message: "Wilson Telematics Backend is running" });
 });
@@ -24,6 +24,11 @@ app.get("/", (req, res) => {
 // -----------------------------
 // Helpers
 // -----------------------------
+function safeNum(x, fallback = 0) {
+  const n = Number(x);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 function getBearerToken(req) {
   const authHeader = req.headers["authorization"] || "";
   if (!authHeader.startsWith("Bearer ")) return null;
@@ -39,28 +44,144 @@ function requireAuth(req, res) {
   return token;
 }
 
-function safeNum(x, fallback = 0) {
-  const n = Number(x);
-  return Number.isFinite(n) ? n : fallback;
+function pickTripArray(payload) {
+  // Damoov payloads vary; try common shapes
+  return (
+    payload?.Result?.Trips ||
+    payload?.Result?.TripList ||
+    payload?.Trips ||
+    payload?.tripList ||
+    []
+  );
+}
+
+function normalizeTrip(t) {
+  // best-effort mapping from Damoov trip summary objects
+  const id = t?.Id || t?.TripId || t?.id || t?.tripId || "";
+  const startDate = t?.StartDate || t?.StartTime || t?.startDate || t?.start_time || "";
+  const endDate = t?.EndDate || t?.EndTime || t?.endDate || t?.end_time || "";
+
+  const distanceKm =
+    safeNum(t?.DistanceKm) ||
+    safeNum(t?.Distance) ||
+    safeNum(t?.distanceKm) ||
+    safeNum(t?.distance_km) ||
+    0;
+
+  const durationSeconds =
+    safeNum(t?.DurationSeconds) ||
+    safeNum(t?.Duration) ||
+    safeNum(t?.durationSeconds) ||
+    safeNum(t?.duration_sec) ||
+    0;
+
+  const averageSpeedKmh =
+    safeNum(t?.AverageSpeedKmh) ||
+    safeNum(t?.AvgSpeedKmh) ||
+    safeNum(t?.averageSpeedKmh) ||
+    0;
+
+  const maxSpeedKmh =
+    safeNum(t?.MaxSpeedKmh) ||
+    safeNum(t?.maxSpeedKmh) ||
+    0;
+
+  // Event counts (may not exist in your trip list response; leave 0 if missing)
+  const harshBrakingCount =
+    safeNum(t?.HarshBrakingCount) ||
+    safeNum(t?.harshBrakingCount) ||
+    safeNum(t?.brakingCount) ||
+    0;
+
+  const harshAccelerationCount =
+    safeNum(t?.HarshAccelerationCount) ||
+    safeNum(t?.harshAccelerationCount) ||
+    safeNum(t?.accelerationCount) ||
+    0;
+
+  const harshCorneringCount =
+    safeNum(t?.HarshCorneringCount) ||
+    safeNum(t?.harshCorneringCount) ||
+    safeNum(t?.corneringCount) ||
+    0;
+
+  const speedingEvents =
+    safeNum(t?.SpeedingEvents) ||
+    safeNum(t?.speedingEvents) ||
+    safeNum(t?.speeding_events) ||
+    0;
+
+  const phoneUsageSeconds =
+    safeNum(t?.PhoneUsageSeconds) ||
+    safeNum(t?.phoneUsageSeconds) ||
+    safeNum(t?.phone_usage_seconds) ||
+    0;
+
+  const nightDrivingRatio =
+    safeNum(t?.NightDrivingRatio) ||
+    safeNum(t?.nightDrivingRatio) ||
+    safeNum(t?.night_driving_ratio) ||
+    0;
+
+  const rushHourDrivingRatio =
+    safeNum(t?.RushHourDrivingRatio) ||
+    safeNum(t?.rushHourDrivingRatio) ||
+    safeNum(t?.rush_hour_driving_ratio) ||
+    0;
+
+  return {
+    id,
+    startDate,
+    endDate,
+    distanceKm,
+    durationSeconds,
+    averageSpeedKmh,
+    maxSpeedKmh,
+    harshBrakingCount,
+    harshAccelerationCount,
+    harshCorneringCount,
+    speedingEvents,
+    phoneUsageSeconds,
+    nightDrivingRatio,
+    rushHourDrivingRatio
+  };
+}
+
+function toPricingEngineInput(normalizedTrip) {
+  // Your pricingEngine.js expects keys like:
+  // distanceKm, durationSeconds, brakingCount, accelerationCount, corneringCount, phoneUsageRatio, nightDrivingRatio, speedingEvents
+  // If your pricingEngine differs, adjust here only (single source of truth).
+  const durationSeconds = safeNum(normalizedTrip.durationSeconds);
+  const phoneUsageSeconds = safeNum(normalizedTrip.phoneUsageSeconds);
+
+  // phoneUsageRatio = phoneSeconds / durationSeconds, clamp 0..1
+  const phoneUsageRatio =
+    durationSeconds > 0 ? Math.max(0, Math.min(1, phoneUsageSeconds / durationSeconds)) : 0;
+
+  return {
+    distanceKm: safeNum(normalizedTrip.distanceKm),
+    durationSeconds: durationSeconds,
+
+    // align to your pricingEngine's expected keys
+    brakingCount: safeNum(normalizedTrip.harshBrakingCount),
+    accelerationCount: safeNum(normalizedTrip.harshAccelerationCount),
+    corneringCount: safeNum(normalizedTrip.harshCorneringCount),
+
+    speedingEvents: safeNum(normalizedTrip.speedingEvents),
+    phoneUsageRatio: phoneUsageRatio,
+    nightDrivingRatio: safeNum(normalizedTrip.nightDrivingRatio)
+  };
 }
 
 // -----------------------------
-// Damoov endpoints config
-// You must set these in .env
+// Damoov endpoints (set in .env)
 // -----------------------------
-const DAMOOV_TRIPS_URL = process.env.DAMOOV_TRIPS_URL; // e.g. https://...
-const DAMOOV_TRIP_WAYPOINTS_URL = process.env.DAMOOV_TRIP_WAYPOINTS_URL; // e.g. https://.../:tripId...
-const DAMOOV_DAILY_STATS_URL = process.env.DAMOOV_DAILY_STATS_URL; // e.g. https://...
-
-// Optional: pricing parameters (can tune later)
-const PRICING_CONFIG = {
-  basePerKm: safeNum(process.env.PRICING_BASE_PER_KM, 0.08),
-  baseFixed: safeNum(process.env.PRICING_BASE_FIXED, 0.35)
-};
+const DAMOOV_TRIPS_URL = process.env.DAMOOV_TRIPS_URL;
+const DAMOOV_TRIP_WAYPOINTS_URL = process.env.DAMOOV_TRIP_WAYPOINTS_URL;
+const DAMOOV_DAILY_STATS_URL = process.env.DAMOOV_DAILY_STATS_URL;
 
 // -----------------------------
 // GET /api/trips
-// Returns normalized trips list (last 30 days), each trip includes pricing
 // -----------------------------
 app.get("/api/trips", async (req, res) => {
   const token = requireAuth(req, res);
@@ -81,97 +202,30 @@ app.get("/api/trips", async (req, res) => {
       params: { DateFrom: dateFrom, DateTo: dateTo }
     });
 
-    // Try to locate trips array from common Damoov shapes
     const raw = response.data;
-    const tripsRaw =
-      raw?.Result?.Trips ||
-      raw?.Result?.TripList ||
-      raw?.Trips ||
-      raw?.tripList ||
-      [];
+    const tripsRaw = pickTripArray(raw);
 
-    const trips = Array.isArray(tripsRaw)
-      ? tripsRaw.map((t) => {
-          // normalize fields (best effort; adjust mapping if your Damoov payload differs)
-          const id = t?.Id || t?.TripId || t?.id || t?.tripId || "";
-          const startDate = t?.StartDate || t?.StartTime || t?.startDate || t?.start_time || "";
-          const endDate = t?.EndDate || t?.EndTime || t?.endDate || t?.end_time || "";
-          const distanceKm =
-            safeNum(t?.DistanceKm) ||
-            safeNum(t?.Distance) ||
-            safeNum(t?.distanceKm) ||
-            safeNum(t?.distance_km) ||
-            0;
-          const durationSeconds =
-            safeNum(t?.DurationSeconds) ||
-            safeNum(t?.Duration) ||
-            safeNum(t?.durationSeconds) ||
-            safeNum(t?.duration_sec) ||
-            0;
+    const normalizedTrips = Array.isArray(tripsRaw) ? tripsRaw.map(normalizeTrip) : [];
 
-          // event counts (if present)
-          const harshBrakingCount =
-            safeNum(t?.HarshBrakingCount) ||
-            safeNum(t?.brakingCount) ||
-            safeNum(t?.harshBrakingCount) ||
-            0;
-          const harshAccelerationCount =
-            safeNum(t?.HarshAccelerationCount) ||
-            safeNum(t?.accelerationCount) ||
-            safeNum(t?.harshAccelerationCount) ||
-            0;
-          const harshCorneringCount =
-            safeNum(t?.HarshCorneringCount) ||
-            safeNum(t?.corneringCount) ||
-            safeNum(t?.harshCorneringCount) ||
-            0;
+    // sort by startDate desc (best effort)
+    normalizedTrips.sort((a, b) => String(b.startDate).localeCompare(String(a.startDate)));
 
-          const phoneUsageSeconds =
-            safeNum(t?.PhoneUsageSeconds) ||
-            safeNum(t?.phoneUsageSeconds) ||
-            safeNum(t?.phone_usage_seconds) ||
-            0;
-
-          const averageSpeedKmh =
-            safeNum(t?.AverageSpeedKmh) ||
-            safeNum(t?.AvgSpeedKmh) ||
-            safeNum(t?.averageSpeedKmh) ||
-            0;
-
-          const maxSpeedKmh =
-            safeNum(t?.MaxSpeedKmh) ||
-            safeNum(t?.maxSpeedKmh) ||
-            0;
-
-          const normalized = {
-            id,
-            startDate,
-            endDate,
-            distanceKm,
-            durationSeconds,
-            averageSpeedKmh,
-            maxSpeedKmh,
-            harshBrakingCount,
-            harshAccelerationCount,
-            harshCorneringCount,
-            phoneUsageSeconds
-          };
-
-          const pricing = computeTripPremium(normalized, PRICING_CONFIG);
-
-          return {
-            ...normalized,
-            pricing
-          };
-        })
-      : [];
+    // attach pricing computed by your pricingEngine.js
+    const tripsWithPricing = normalizedTrips.map((t) => {
+      const input = toPricingEngineInput(t);
+      const pricing = calculateTripCost(input, PRICING_CONFIG);
+      return {
+        ...t,
+        pricing
+      };
+    });
 
     res.json({
       source: "damoov_trips_v1",
       dateFrom,
       dateTo,
-      count: trips.length,
-      trips
+      count: tripsWithPricing.length,
+      trips: tripsWithPricing
     });
   } catch (err) {
     const status = err?.response?.status || 500;
@@ -184,7 +238,6 @@ app.get("/api/trips", async (req, res) => {
 
 // -----------------------------
 // GET /api/pricing/summary?limit=30
-// Uses /api/trips data shape and returns summary for last N trips
 // -----------------------------
 app.get("/api/pricing/summary", async (req, res) => {
   const token = requireAuth(req, res);
@@ -207,57 +260,51 @@ app.get("/api/pricing/summary", async (req, res) => {
     });
 
     const raw = response.data;
-    const tripsRaw =
-      raw?.Result?.Trips ||
-      raw?.Result?.TripList ||
-      raw?.Trips ||
-      raw?.tripList ||
-      [];
+    const tripsRaw = pickTripArray(raw);
 
-    const normalizedTrips = Array.isArray(tripsRaw)
-      ? tripsRaw.map((t) => {
-          const id = t?.Id || t?.TripId || t?.id || t?.tripId || "";
-          const startDate = t?.StartDate || t?.StartTime || t?.startDate || t?.start_time || "";
-          const endDate = t?.EndDate || t?.EndTime || t?.endDate || t?.end_time || "";
-          const distanceKm =
-            safeNum(t?.DistanceKm) || safeNum(t?.Distance) || safeNum(t?.distanceKm) || 0;
-          const durationSeconds =
-            safeNum(t?.DurationSeconds) || safeNum(t?.Duration) || safeNum(t?.durationSeconds) || 0;
+    const normalizedTrips = Array.isArray(tripsRaw) ? tripsRaw.map(normalizeTrip) : [];
 
-          const harshBrakingCount = safeNum(t?.HarshBrakingCount) || safeNum(t?.harshBrakingCount) || 0;
-          const harshAccelerationCount = safeNum(t?.HarshAccelerationCount) || safeNum(t?.harshAccelerationCount) || 0;
-          const harshCorneringCount = safeNum(t?.HarshCorneringCount) || safeNum(t?.harshCorneringCount) || 0;
-          const phoneUsageSeconds = safeNum(t?.PhoneUsageSeconds) || safeNum(t?.phoneUsageSeconds) || 0;
+    // sort desc then slice
+    normalizedTrips.sort((a, b) => String(b.startDate).localeCompare(String(a.startDate)));
+    const sliced = normalizedTrips.slice(0, limit);
 
-          const averageSpeedKmh = safeNum(t?.AverageSpeedKmh) || safeNum(t?.averageSpeedKmh) || 0;
-          const maxSpeedKmh = safeNum(t?.MaxSpeedKmh) || safeNum(t?.maxSpeedKmh) || 0;
+    // compute per-trip pricing & score
+    const pricedTrips = sliced.map((t) => {
+      const input = toPricingEngineInput(t);
+      const pricing = calculateTripCost(input, PRICING_CONFIG);
 
-          return {
-            id,
-            startDate,
-            endDate,
-            distanceKm,
-            durationSeconds,
-            averageSpeedKmh,
-            maxSpeedKmh,
-            harshBrakingCount,
-            harshAccelerationCount,
-            harshCorneringCount,
-            phoneUsageSeconds
-          };
-        })
-      : [];
+      // Try to standardize fields from pricingEngine output
+      // Your pricingEngine currently returns { basePrice, finalPrice, riskScore, ... } (based on the file you uploaded)
+      const premium = safeNum(pricing?.finalPrice ?? pricing?.premium ?? pricing?.price, 0);
+      const score = safeNum(pricing?.riskScore ?? pricing?.score ?? 0, 0);
 
-    // sort by startDate desc (best-effort)
-    normalizedTrips.sort((a, b) => (String(b.startDate)).localeCompare(String(a.startDate)));
+      return {
+        id: t.id,
+        startDate: t.startDate,
+        endDate: t.endDate,
+        distanceKm: t.distanceKm,
+        durationSeconds: t.durationSeconds,
+        premium: +premium.toFixed(2),
+        score: +score.toFixed(1)
+      };
+    });
 
-    const summary = computePricingSummary(normalizedTrips, limit, PRICING_CONFIG);
+    const tripCount = pricedTrips.length;
+    const totalPremium = pricedTrips.reduce((s, x) => s + safeNum(x.premium), 0);
+    const avgPremium = tripCount ? totalPremium / tripCount : 0;
+    const avgScore = tripCount ? pricedTrips.reduce((s, x) => s + safeNum(x.score), 0) / tripCount : 0;
+    const totalDistanceKm = pricedTrips.reduce((s, x) => s + safeNum(x.distanceKm), 0);
 
     res.json({
       source: "pricing_summary_v1",
-      dateFrom,
-      dateTo,
-      ...summary
+      currency: "USD",
+      limit,
+      tripCount,
+      totalPremium: +totalPremium.toFixed(2),
+      avgPremium: +avgPremium.toFixed(2),
+      avgScore: +avgScore.toFixed(1),
+      totalDistanceKm: +totalDistanceKm.toFixed(3),
+      trips: pricedTrips
     });
   } catch (err) {
     const status = err?.response?.status || 500;
@@ -270,7 +317,6 @@ app.get("/api/pricing/summary", async (req, res) => {
 
 // -----------------------------
 // GET /api/trips/:tripId/waypoints
-// If you already had it, keep your original. This is a safe template.
 // -----------------------------
 app.get("/api/trips/:tripId/waypoints", async (req, res) => {
   const token = requireAuth(req, res);
@@ -284,12 +330,11 @@ app.get("/api/trips/:tripId/waypoints", async (req, res) => {
 
   try {
     const url = DAMOOV_TRIP_WAYPOINTS_URL.replace(":tripId", encodeURIComponent(tripId));
+
     const response = await axios.get(url, {
       headers: { Authorization: `Bearer ${token}` }
     });
 
-    // You likely already parse/transform waypoints in your existing code;
-    // keep your original logic if it works better.
     res.json(response.data);
   } catch (err) {
     const status = err?.response?.status || 500;
@@ -302,7 +347,6 @@ app.get("/api/trips/:tripId/waypoints", async (req, res) => {
 
 // -----------------------------
 // GET /api/daily-stats
-// Keep your existing if already working. Here is a safe template.
 // -----------------------------
 app.get("/api/daily-stats", async (req, res) => {
   const token = requireAuth(req, res);
@@ -334,15 +378,14 @@ app.get("/api/daily-stats", async (req, res) => {
 
 // -----------------------------
 // POST /api/alert-events
-// Frontend can log real-time alerts here
 // -----------------------------
 app.post("/api/alert-events", (req, res) => {
-  // optional: requireAuth(req,res) if you want to enforce
   const body = req.body || {};
   console.log("📡 [AlertEvent]", body);
   res.json({ ok: true });
 });
 
+// Start server
 app.listen(PORT, () => {
   console.log(`🚀 Wilson Telematics Backend is running on port ${PORT}`);
 });
