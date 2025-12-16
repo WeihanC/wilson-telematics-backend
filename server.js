@@ -22,6 +22,9 @@ const PORT = process.env.PORT || 8080;
 // 👇 新增：引入实时 WebSocket 管线
 const { startRealtimePipeline } = require('./realtimePipeline');
 
+// 👇 新增：引入定价引擎
+const { calculateTripCost } = require('./pricingEngine');
+
 app.use(cors());
 app.use(express.json());
 
@@ -117,6 +120,21 @@ app.get('/api/trips', async (req, res) => {
       const nightRatio     = totalTimeMin > 0 ? nightMin / totalTimeMin : 0;
       const rushRatio      = totalTimeMin > 0 ? rushMin / totalTimeMin : 0;
 
+      // ✅ 构建定价输入对象
+      const pricingInput = {
+        distanceKm: mileageKm,
+        harshBrakingCount: brakeCount,
+        harshAccelerationCount: accelCount,
+        harshCorneringCount: cornerCount,
+        phoneUsageSeconds: Math.round(phoneMin * 60),
+        nightDrivingRatio: nightRatio,
+        rushHourDrivingRatio: rushRatio,
+        speedingEvents: 0 // Trips API 里没有"事件次数"，只有超速里程，就先用 0 占位
+      };
+
+      // ✅ 计算定价
+      const pricing = calculateTripCost(pricingInput);
+
       return {
         id:
           t.Id ||
@@ -149,7 +167,7 @@ app.get('/api/trips', async (req, res) => {
         harshAccelerationCount: accelCount,
         harshCorneringCount: cornerCount,
 
-        // Trips API 里没有“事件次数”，只有超速里程，就先用 0 占位
+        // Trips API 里没有"事件次数"，只有超速里程，就先用 0 占位
         speedingEvents: 0,
 
         // ✅ 手机使用（秒）
@@ -157,7 +175,10 @@ app.get('/api/trips', async (req, res) => {
 
         // ✅ 夜间/高峰比例
         nightDrivingRatio: nightRatio,
-        rushHourDrivingRatio: rushRatio
+        rushHourDrivingRatio: rushRatio,
+
+        // ✅ 定价信息
+        pricing
       };
     });
 
