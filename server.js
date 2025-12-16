@@ -1,5 +1,16 @@
 // server.js
 // Wilson Telematics Backend - proxy for Damoov APIs + Pricing Summary + Alert events
+// Compatible with your old working endpoints:
+// - Trips: POST https://api.telematicssdk.com/trips/get/v1/
+// - Waypoints: POST https://api.telematicssdk.com/trips/get/v1/:tripId/waypoints
+// - Daily stats: GET https://api.telematicssdk.com/indicators/v2/Statistics/daily
+
+process.on("uncaughtException", (err) => {
+  console.error("❌ UNCAUGHT EXCEPTION:", err);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("❌ UNHANDLED REJECTION:", reason);
+});
 
 const express = require("express");
 const axios = require("axios");
@@ -44,144 +55,90 @@ function requireAuth(req, res) {
   return token;
 }
 
-function pickTripArray(payload) {
-  // Damoov payloads vary; try common shapes
-  return (
-    payload?.Result?.Trips ||
-    payload?.Result?.TripList ||
-    payload?.Trips ||
-    payload?.tripList ||
-    []
-  );
-}
+// -----------------------------
+// Damoov endpoints (set in Railway env)
+// -----------------------------
+const DAMOOV_TRIPS_URL = process.env.DAMOOV_TRIPS_URL; // POST
+const DAMOOV_TRIP_WAYPOINTS_URL = process.env.DAMOOV_TRIP_WAYPOINTS_URL; // POST, contains :tripId
+const DAMOOV_DAILY_STATS_URL = process.env.DAMOOV_DAILY_STATS_URL; // GET
 
-function normalizeTrip(t) {
-  // best-effort mapping from Damoov trip summary objects
-  const id = t?.Id || t?.TripId || t?.id || t?.tripId || "";
-  const startDate = t?.StartDate || t?.StartTime || t?.startDate || t?.start_time || "";
-  const endDate = t?.EndDate || t?.EndTime || t?.endDate || t?.end_time || "";
+// -----------------------------
+// Normalize trips (match your old mapping)
+// -----------------------------
+function mapTripFromTripsApi(t) {
+  const stats = t?.Statistics || {};
+  const data = t?.Data || {};
 
-  const distanceKm =
-    safeNum(t?.DistanceKm) ||
-    safeNum(t?.Distance) ||
-    safeNum(t?.distanceKm) ||
-    safeNum(t?.distance_km) ||
-    0;
+  const mileageKm = safeNum(stats.Mileage, 0);
+  const durationMin = safeNum(stats.DurationMinutes, 0);
+  const avgSpeed = safeNum(stats.AverageSpeed, 0);
+  const maxSpeed = safeNum(stats.MaxSpeed, 0);
 
-  const durationSeconds =
-    safeNum(t?.DurationSeconds) ||
-    safeNum(t?.Duration) ||
-    safeNum(t?.durationSeconds) ||
-    safeNum(t?.duration_sec) ||
-    0;
+  const accelCount = safeNum(stats.AccelerationsCount, 0);
+  const brakeCount = safeNum(stats.BrakingsCount, 0);
+  const cornerCount = safeNum(stats.CorneringsCount, 0);
 
-  const averageSpeedKmh =
-    safeNum(t?.AverageSpeedKmh) ||
-    safeNum(t?.AvgSpeedKmh) ||
-    safeNum(t?.averageSpeedKmh) ||
-    0;
+  const phoneMin = safeNum(stats.PhoneUsageDurationMinutes, 0);
 
-  const maxSpeedKmh =
-    safeNum(t?.MaxSpeedKmh) ||
-    safeNum(t?.maxSpeedKmh) ||
-    0;
+  const dayMin = safeNum(stats.DayHours, 0);
+  const rushMin = safeNum(stats.RushHours, 0);
+  const nightMin = safeNum(stats.NightHours, 0);
+  const totalTimeMin = dayMin + rushMin + nightMin;
 
-  // Event counts (may not exist in your trip list response; leave 0 if missing)
-  const harshBrakingCount =
-    safeNum(t?.HarshBrakingCount) ||
-    safeNum(t?.harshBrakingCount) ||
-    safeNum(t?.brakingCount) ||
-    0;
+  const nightRatio = totalTimeMin > 0 ? nightMin / totalTimeMin : 0;
+  const rushRatio = totalTimeMin > 0 ? rushMin / totalTimeMin : 0;
 
-  const harshAccelerationCount =
-    safeNum(t?.HarshAccelerationCount) ||
-    safeNum(t?.harshAccelerationCount) ||
-    safeNum(t?.accelerationCount) ||
-    0;
+  const mapped = {
+    id: t?.Id || t?.TripId || t?.TrackToken || t?.IdTrip || t?.TripToken || "",
 
-  const harshCorneringCount =
-    safeNum(t?.HarshCorneringCount) ||
-    safeNum(t?.harshCorneringCount) ||
-    safeNum(t?.corneringCount) ||
-    0;
+    startDate: data?.StartDate || data?.StartDateUtc || null,
+    endDate: data?.EndDate || data?.EndDateUtc || null,
 
-  const speedingEvents =
-    safeNum(t?.SpeedingEvents) ||
-    safeNum(t?.speedingEvents) ||
-    safeNum(t?.speeding_events) ||
-    0;
+    distanceKm: mileageKm,
+    durationSeconds: Math.round(durationMin * 60),
 
-  const phoneUsageSeconds =
-    safeNum(t?.PhoneUsageSeconds) ||
-    safeNum(t?.phoneUsageSeconds) ||
-    safeNum(t?.phone_usage_seconds) ||
-    0;
+    averageSpeedKmh: avgSpeed,
+    maxSpeedKmh: maxSpeed,
 
-  const nightDrivingRatio =
-    safeNum(t?.NightDrivingRatio) ||
-    safeNum(t?.nightDrivingRatio) ||
-    safeNum(t?.night_driving_ratio) ||
-    0;
+    harshBrakingCount: brakeCount,
+    harshAccelerationCount: accelCount,
+    harshCorneringCount: cornerCount,
 
-  const rushHourDrivingRatio =
-    safeNum(t?.RushHourDrivingRatio) ||
-    safeNum(t?.rushHourDrivingRatio) ||
-    safeNum(t?.rush_hour_driving_ratio) ||
-    0;
+    // Trips API 在你旧代码里没有“超速次数”，先占位 0
+    speedingEvents: 0,
 
-  return {
-    id,
-    startDate,
-    endDate,
-    distanceKm,
-    durationSeconds,
-    averageSpeedKmh,
-    maxSpeedKmh,
-    harshBrakingCount,
-    harshAccelerationCount,
-    harshCorneringCount,
-    speedingEvents,
-    phoneUsageSeconds,
-    nightDrivingRatio,
-    rushHourDrivingRatio
+    phoneUsageSeconds: Math.round(phoneMin * 60),
+
+    nightDrivingRatio: nightRatio,
+    rushHourDrivingRatio: rushRatio
   };
+
+  return mapped;
 }
 
-function toPricingEngineInput(normalizedTrip) {
-  // Your pricingEngine.js expects keys like:
-  // distanceKm, durationSeconds, brakingCount, accelerationCount, corneringCount, phoneUsageRatio, nightDrivingRatio, speedingEvents
-  // If your pricingEngine differs, adjust here only (single source of truth).
-  const durationSeconds = safeNum(normalizedTrip.durationSeconds);
-  const phoneUsageSeconds = safeNum(normalizedTrip.phoneUsageSeconds);
+function toPricingEngineInput(mappedTrip) {
+  const durationSeconds = safeNum(mappedTrip.durationSeconds);
+  const phoneUsageSeconds = safeNum(mappedTrip.phoneUsageSeconds);
 
-  // phoneUsageRatio = phoneSeconds / durationSeconds, clamp 0..1
   const phoneUsageRatio =
     durationSeconds > 0 ? Math.max(0, Math.min(1, phoneUsageSeconds / durationSeconds)) : 0;
 
   return {
-    distanceKm: safeNum(normalizedTrip.distanceKm),
+    distanceKm: safeNum(mappedTrip.distanceKm),
     durationSeconds: durationSeconds,
 
-    // align to your pricingEngine's expected keys
-    brakingCount: safeNum(normalizedTrip.harshBrakingCount),
-    accelerationCount: safeNum(normalizedTrip.harshAccelerationCount),
-    corneringCount: safeNum(normalizedTrip.harshCorneringCount),
+    brakingCount: safeNum(mappedTrip.harshBrakingCount),
+    accelerationCount: safeNum(mappedTrip.harshAccelerationCount),
+    corneringCount: safeNum(mappedTrip.harshCorneringCount),
 
-    speedingEvents: safeNum(normalizedTrip.speedingEvents),
+    speedingEvents: safeNum(mappedTrip.speedingEvents),
     phoneUsageRatio: phoneUsageRatio,
-    nightDrivingRatio: safeNum(normalizedTrip.nightDrivingRatio)
+    nightDrivingRatio: safeNum(mappedTrip.nightDrivingRatio)
   };
 }
 
 // -----------------------------
-// Damoov endpoints (set in .env)
-// -----------------------------
-const DAMOOV_TRIPS_URL = process.env.DAMOOV_TRIPS_URL;
-const DAMOOV_TRIP_WAYPOINTS_URL = process.env.DAMOOV_TRIP_WAYPOINTS_URL;
-const DAMOOV_DAILY_STATS_URL = process.env.DAMOOV_DAILY_STATS_URL;
-
-// -----------------------------
-// GET /api/trips
+// POST /api/trips  (actually GET route but calls Damoov POST)
 // -----------------------------
 app.get("/api/trips", async (req, res) => {
   const token = requireAuth(req, res);
@@ -192,32 +149,45 @@ app.get("/api/trips", async (req, res) => {
   }
 
   try {
-    // last 30 days
     const now = new Date();
     const dateTo = now.toISOString();
     const dateFrom = new Date(now.getTime() - 30 * 24 * 3600 * 1000).toISOString();
 
-    const response = await axios.get(DAMOOV_TRIPS_URL, {
-      headers: { Authorization: `Bearer ${token}` },
-      params: { DateFrom: dateFrom, DateTo: dateTo }
+    // Damoov trips/get/v1 expects POST + body (per your old working code)
+    const body = {
+      StartDate: dateFrom,
+      EndDate: dateTo,
+      IncludeDetails: true,
+      IncludeStatistics: true,
+      IncludeScores: true,
+      Locale: "EN",
+      UnitSystem: "Si",
+      SortBy: "StartDateUtc_Desc",
+      Paging: { Page: 1, Count: 50, IncludePagingInfo: true }
+    };
+
+    const damoovResp = await axios.post(DAMOOV_TRIPS_URL, body, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Accept: "application/json"
+      }
     });
 
-    const raw = response.data;
-    const tripsRaw = pickTripArray(raw);
+    const raw = damoovResp.data;
+    const tripsRaw = raw?.Result?.Trips || [];
 
-    const normalizedTrips = Array.isArray(tripsRaw) ? tripsRaw.map(normalizeTrip) : [];
+    if (!Array.isArray(tripsRaw) || tripsRaw.length === 0) {
+      return res.json({ source: "damoov_trips_v1", trips: [], count: 0 });
+    }
 
-    // sort by startDate desc (best effort)
-    normalizedTrips.sort((a, b) => String(b.startDate).localeCompare(String(a.startDate)));
+    const mapped = tripsRaw.map(mapTripFromTripsApi);
 
-    // attach pricing computed by your pricingEngine.js
-    const tripsWithPricing = normalizedTrips.map((t) => {
+    // attach pricing
+    const tripsWithPricing = mapped.map((t) => {
       const input = toPricingEngineInput(t);
       const pricing = calculateTripCost(input, PRICING_CONFIG);
-      return {
-        ...t,
-        pricing
-      };
+      return { ...t, pricing };
     });
 
     res.json({
@@ -228,10 +198,10 @@ app.get("/api/trips", async (req, res) => {
       trips: tripsWithPricing
     });
   } catch (err) {
-    const status = err?.response?.status || 500;
-    res.status(status).json({
+    console.error("❌ Error from Damoov (trips/get/v1):", err?.response?.data || err.message);
+    res.status(err?.response?.status || 500).json({
       error: "Failed to fetch trips from Damoov",
-      detail: err?.response?.data || String(err)
+      detail: err?.response?.data || err.message
     });
   }
 });
@@ -254,27 +224,35 @@ app.get("/api/pricing/summary", async (req, res) => {
     const dateTo = now.toISOString();
     const dateFrom = new Date(now.getTime() - 30 * 24 * 3600 * 1000).toISOString();
 
-    const response = await axios.get(DAMOOV_TRIPS_URL, {
-      headers: { Authorization: `Bearer ${token}` },
-      params: { DateFrom: dateFrom, DateTo: dateTo }
+    const body = {
+      StartDate: dateFrom,
+      EndDate: dateTo,
+      IncludeDetails: true,
+      IncludeStatistics: true,
+      IncludeScores: true,
+      Locale: "EN",
+      UnitSystem: "Si",
+      SortBy: "StartDateUtc_Desc",
+      Paging: { Page: 1, Count: 100, IncludePagingInfo: true }
+    };
+
+    const damoovResp = await axios.post(DAMOOV_TRIPS_URL, body, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Accept: "application/json"
+      }
     });
 
-    const raw = response.data;
-    const tripsRaw = pickTripArray(raw);
+    const raw = damoovResp.data;
+    const tripsRaw = raw?.Result?.Trips || [];
+    const mapped = Array.isArray(tripsRaw) ? tripsRaw.map(mapTripFromTripsApi) : [];
 
-    const normalizedTrips = Array.isArray(tripsRaw) ? tripsRaw.map(normalizeTrip) : [];
+    // newest first already sorted by API, but safe:
+    const sliced = mapped.slice(0, limit);
 
-    // sort desc then slice
-    normalizedTrips.sort((a, b) => String(b.startDate).localeCompare(String(a.startDate)));
-    const sliced = normalizedTrips.slice(0, limit);
-
-    // compute per-trip pricing & score
     const pricedTrips = sliced.map((t) => {
-      const input = toPricingEngineInput(t);
-      const pricing = calculateTripCost(input, PRICING_CONFIG);
-
-      // Try to standardize fields from pricingEngine output
-      // Your pricingEngine currently returns { basePrice, finalPrice, riskScore, ... } (based on the file you uploaded)
+      const pricing = calculateTripCost(toPricingEngineInput(t), PRICING_CONFIG);
       const premium = safeNum(pricing?.finalPrice ?? pricing?.premium ?? pricing?.price, 0);
       const score = safeNum(pricing?.riskScore ?? pricing?.score ?? 0, 0);
 
@@ -307,16 +285,16 @@ app.get("/api/pricing/summary", async (req, res) => {
       trips: pricedTrips
     });
   } catch (err) {
-    const status = err?.response?.status || 500;
-    res.status(status).json({
+    console.error("❌ Error computing pricing summary:", err?.response?.data || err.message);
+    res.status(err?.response?.status || 500).json({
       error: "Failed to compute pricing summary",
-      detail: err?.response?.data || String(err)
+      detail: err?.response?.data || err.message
     });
   }
 });
 
 // -----------------------------
-// GET /api/trips/:tripId/waypoints
+// GET /api/trips/:tripId/waypoints  (calls Damoov POST)
 // -----------------------------
 app.get("/api/trips/:tripId/waypoints", async (req, res) => {
   const token = requireAuth(req, res);
@@ -331,22 +309,43 @@ app.get("/api/trips/:tripId/waypoints", async (req, res) => {
   try {
     const url = DAMOOV_TRIP_WAYPOINTS_URL.replace(":tripId", encodeURIComponent(tripId));
 
-    const response = await axios.get(url, {
-      headers: { Authorization: `Bearer ${token}` }
+    const body = {
+      IncludeEvents: true,
+      UnitSystem: "Si"
+    };
+
+    const damoovResp = await axios.post(url, body, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Accept: "application/json"
+      }
     });
 
-    res.json(response.data);
+    const rawTrip = damoovResp.data?.Result?.Trip;
+    const waypoints = rawTrip?.Waypoints || [];
+    const eventsRaw = rawTrip?.Events || [];
+
+    const polyline = waypoints.map((wp) => ({ lat: wp.Lat, lon: wp.Long }));
+    const speedSeries = waypoints.map((wp) => ({ t: wp.SecSinceStart, speedKmh: wp.Speed }));
+    const events = eventsRaw.map((ev) => ({
+      lat: ev.Lat ?? ev.Latitude ?? 0,
+      lon: ev.Long ?? ev.Longitude ?? 0,
+      type: ev.Type || ev.EventType || ev.EventName || ""
+    }));
+
+    res.json({ tripId, polyline, speedSeries, events });
   } catch (err) {
-    const status = err?.response?.status || 500;
-    res.status(status).json({
+    console.error("❌ Error fetching trip waypoints:", err?.response?.data || err.message);
+    res.status(err?.response?.status || 500).json({
       error: "Failed to fetch trip waypoints",
-      detail: err?.response?.data || String(err)
+      detail: err?.response?.data || err.message
     });
   }
 });
 
 // -----------------------------
-// GET /api/daily-stats
+// GET /api/daily-stats  (keeps iOS expected shape: { days: [...] })
 // -----------------------------
 app.get("/api/daily-stats", async (req, res) => {
   const token = requireAuth(req, res);
@@ -357,21 +356,48 @@ app.get("/api/daily-stats", async (req, res) => {
   }
 
   try {
+    // last 30 days
     const now = new Date();
-    const endDate = now.toISOString().slice(0, 10);
-    const startDate = new Date(now.getTime() - 30 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+    const start = new Date(now.getTime() - 30 * 24 * 3600 * 1000);
 
-    const response = await axios.get(DAMOOV_DAILY_STATS_URL, {
-      headers: { Authorization: `Bearer ${token}` },
-      params: { StartDate: startDate, EndDate: endDate }
+    const formatDate = (d) => d.toISOString().slice(0, 19); // "YYYY-MM-DDTHH:mm:ss"
+    const StartDate = formatDate(start);
+    const EndDate = formatDate(now);
+
+    const damoovResp = await axios.get(DAMOOV_DAILY_STATS_URL, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json"
+      },
+      params: { StartDate, EndDate, UnitSystem: "Si" }
     });
 
-    res.json(response.data);
+    const raw = damoovResp.data;
+    const list = raw?.Result || [];
+
+    const clean = (Array.isArray(list) ? list : []).map((d) => ({
+      date: d.ReportDate || null,
+      mileageKm: safeNum(d.MileageKm, 0),
+      tripsCount: safeNum(d.TripsCount, 0),
+      avgSpeedKmh: safeNum(d.AverageSpeedKmh, 0),
+      maxSpeedKmh: safeNum(d.MaxSpeedKmh, 0),
+      speedingKm: safeNum(d.TotalSpeedingKm, 0),
+      accelerationsCount: safeNum(d.AccelerationsCount, 0),
+      brakingsCount: safeNum(d.BrakingsCount, 0),
+      corneringsCount: safeNum(d.CorneringsCount, 0),
+      phoneUsageMin: safeNum(d.PhoneUsageDurationMin, 0),
+      drivingTimeMin: safeNum(d.DrivingTime, 0),
+      nightDrivingMin: safeNum(d.NightDrivingTime, 0),
+      rushHourDrivingMin: safeNum(d.RushHoursDrivingTime, 0)
+    }));
+
+    // ✅ important: keep iOS expected keys
+    res.json({ days: clean, count: clean.length });
   } catch (err) {
-    const status = err?.response?.status || 500;
-    res.status(status).json({
+    console.error("❌ Error from Damoov daily stats:", err?.response?.data || err.message);
+    res.status(err?.response?.status || 500).json({
       error: "Failed to fetch daily stats",
-      detail: err?.response?.data || String(err)
+      detail: err?.response?.data || err.message
     });
   }
 });
@@ -380,8 +406,7 @@ app.get("/api/daily-stats", async (req, res) => {
 // POST /api/alert-events
 // -----------------------------
 app.post("/api/alert-events", (req, res) => {
-  const body = req.body || {};
-  console.log("📡 [AlertEvent]", body);
+  console.log("📡 [AlertEvent]", req.body || {});
   res.json({ ok: true });
 });
 
